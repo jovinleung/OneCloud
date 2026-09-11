@@ -1,0 +1,49 @@
+#!/bin/sh
+# Set a stable MAC address for eth0 derived from the eMMC CID.
+#
+# The stmmac driver generates a random MAC on every boot because neither
+# the DTS nor U-Boot provides a persistent one (efuse is empty on OneCloud).
+# A changing MAC breaks DHCP leases, ARP caches, and port-based ACLs.
+# We derive a locally-administered MAC from the eMMC CID, which is
+# globally unique and immutable.
+
+[ "$ACTION" = "add" ] || [ "$ACTION" = "register" ] || exit 0
+[ "$INTERFACE" = "eth0" ] || exit 0
+
+[ -d "/sys/class/net/$INTERFACE" ] || exit 0
+
+# Find the eMMC device and read its CID
+CID=""
+for dev in mmcblk1 mmcblk0; do
+    if [ -f "/sys/block/$dev/device/cid" ]; then
+        mtype=$(cat "/sys/block/$dev/device/type" 2>/dev/null)
+        if [ "$mtype" = "MMC" ]; then
+            CID=$(cat "/sys/block/$dev/device/cid" 2>/dev/null)
+            [ -n "$CID" ] && break
+        fi
+    fi
+done
+
+[ -z "$CID" ] && exit 0
+
+# Derive a locally-administered, unicast MAC from the CID.
+# OUI 02:xx:xx:xx:xx:xx (locally administered, unicast).
+# Use CID bytes 1-5 (skipping the manufacturer ID at byte 0).
+B1=$(echo "$CID" | cut -c3-4)
+B2=$(echo "$CID" | cut -c5-6)
+B3=$(echo "$CID" | cut -c7-8)
+B4=$(echo "$CID" | cut -c9-10)
+B5=$(echo "$CID" | cut -c11-12)
+
+[ -z "$B1" ] || [ -z "$B2" ] || [ -z "$B3" ] || [ -z "$B4" ] || [ -z "$B5" ] && exit 0
+
+MAC="02:${B1}:${B2}:${B3}:${B4}:${B5}"
+
+# Only set if different from current MAC (avoid unnecessary changes)
+CURRENT=$(cat "/sys/class/net/$INTERFACE/address" 2>/dev/null)
+if [ "$CURRENT" != "$MAC" ]; then
+    ip link set "$INTERFACE" address "$MAC" 2>/dev/null
+    logger -t fix-mac "eth0 MAC set to $MAC (derived from eMMC CID)"
+fi
+
+exit 0

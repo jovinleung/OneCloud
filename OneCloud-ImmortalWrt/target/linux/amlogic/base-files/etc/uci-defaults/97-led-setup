@@ -1,0 +1,34 @@
+#!/bin/sh
+# OneCloud LED configuration via OpenWrt standard uci system led section.
+# This is applied on first boot; /etc/init.d/led manages the actual triggers.
+
+# Blue LED: heartbeat (system running status)
+uci -q delete system.led_blue
+uci set system.led_blue=led
+uci set system.led_blue.name='blue:status'
+uci set system.led_blue.sysfs='blue:status'
+uci set system.led_blue.trigger='heartbeat'
+
+# Green LED: netdev (network activity on eth0)
+uci -q delete system.led_green
+uci set system.led_green=led
+uci set system.led_green.name='green:status'
+uci set system.led_green.sysfs='green:status'
+uci set system.led_green.trigger='netdev'
+uci set system.led_green.dev='eth0'
+uci set system.led_green.mode='link tx rx'
+
+# Red LED: off during normal operation
+# (DTS aliases led-boot/led-failsafe use red for boot/error indication)
+uci -q delete system.led_red
+uci set system.led_red=led
+uci set system.led_red.name='red:status'
+uci set system.led_red.sysfs='red:status'
+uci set system.led_red.trigger='none'
+uci set system.led_red.brightness='0'
+
+uci commit system
+
+logger -t led-setup "LED triggers configured via uci: blue=heartbeat, green=netdev(eth0), red=off"
+
+exit 0

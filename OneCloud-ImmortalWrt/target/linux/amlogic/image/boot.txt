@@ -1,0 +1,30 @@
+
+setenv condev "console=ttyAML0,115200n8 no_console_suspend consoleblank=0"
+
+# Auto-detect eMMC device number (mmcblk0 or mmcblk1)
+# On OneCloud, eMMC is usually mmcblk1 when an SD card is present (mmcblk0).
+if test -n "${emmc_dev}"; then
+    setenv root_dev "mmcblk${emmc_dev}p2"
+else
+    setenv emmc_dev "1"
+    setenv root_dev "mmcblk1p2"
+fi
+
+setenv bootargs "root=/dev/${root_dev} rootfstype=ext4 rootwait ro ${condev} fsck.repair=yes net.ifnames=0 panic=3 oops=panic"
+
+# Only append mac if it is set and looks like a valid MAC address
+if test -n "${mac}"; then
+    case "${mac}" in
+        *:*) setenv bootargs "${bootargs} mac=${mac}" ;;
+    esac
+fi
+
+setenv kernel_loadaddr "0x00208000"
+setenv dtb_loadaddr "0x21800000"
+
+# Load kernel and dtb (Amlogic U-Boot default filenames)
+if fatload mmc ${emmc_dev}:1 ${kernel_loadaddr} kernel.img; then
+    if fatload mmc ${emmc_dev}:1 ${dtb_loadaddr} dtb.img; then
+        bootm ${kernel_loadaddr} - ${dtb_loadaddr}
+    fi
+fi

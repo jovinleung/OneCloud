@@ -1,0 +1,246 @@
+name: Build OneCloud ImmortalWrt
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: onecloud-immortalwrt-build
+  cancel-in-progress: false
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: master
+  CONFIG_FILE: OneCloud-ImmortalWrt/.config
+  DIY_P1_SH: OneCloud-ImmortalWrt/op1.sh
+  DIY_P2_SH: OneCloud-ImmortalWrt/op2.sh
+  UPLOAD_BIN_DIR: true
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 1G
+  # Go 模块代理：修复 make download 阶段 Go 模块 zip 下载不完整导致
+  # internal 子包缺失的问题（如 go-cty/internal/graphemes、go-cmp/internal/flags 等）
+  GOPROXY: https://proxy.golang.org,direct
+  # 允许编译时自动补全缺失的 Go 模块（默认 -mod=readonly 会直接报错）
+  GOFLAGS: -mod=mod
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Free disk space
+      uses: rmoyulong/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk \
+                                gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+                                python3-setuptools rsync swig unzip zlib1g-dev file wget \
+                                android-sdk-libsparse-utils ccache
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+        ccache -M $CCACHE_MAXSIZE
+        ccache -z
+        echo "--------------------------CPU信息--------------------------"
+        echo "CPU核心数: $(nproc)"
+        echo "CPU型号: $(cat /proc/cpuinfo | grep name | head -1 | cut -f2 -d:)"
+        echo "--------------------------磁盘信息--------------------------"
+        df -hT
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH --depth 1 openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Cache ccache, toolchain and downloads
+      uses: actions/cache@main
+      with:
+        path: |
+          /home/runner/.ccache
+          /workdir/openwrt/dl
+          /workdir/openwrt/staging_dir
+        key: ${{ runner.os }}-onecloud-immortalwrt-v2-${{ env.REPO_BRANCH }}-${{ hashFiles('OneCloud-ImmortalWrt/.config', 'OneCloud-ImmortalWrt/op1.sh', 'OneCloud-ImmortalWrt/op2.sh', '.github/workflows/onecloud-immortalwrt.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-onecloud-immortalwrt-v2-${{ env.REPO_BRANCH }}-
+          ${{ runner.os }}-onecloud-immortalwrt-v2-
+
+    - name: Load onecloud meson target
+      run: |
+        [ -e OneCloud-ImmortalWrt/target ] && cp -rf OneCloud-ImmortalWrt/target openwrt/
+        echo "amlogic target loaded"
+        ls -l openwrt/target/linux/amlogic/
+
+    - name: Load custom feeds
+      run: |
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        # 调试：检查 target 目录是否正确加载
+        echo "=== target/linux 目录 ==="
+        ls target/linux/ | grep -i amlogic || echo "未找到 amlogic target!"
+        echo "=== amlogic target 文件 ==="
+        find target/linux/amlogic -type f | head -20
+        echo "=== .config 中 target 相关配置 ==="
+        grep 'CONFIG_TARGET_' .config | head -10
+
+        # ccache 必须在 defconfig 之前启用
+        echo "CONFIG_CCACHE=y" >> .config
+        make defconfig
+        make download -j$(( $(nproc) + 1 ))
+        # 清理下载不完整的文件（小于 1024 字节），但必须排除 dl/go-mod-cache/！
+        # Go 模块缓存中包含大量合法的小文件（internal 子包、go.mod、fuzz 测试数据等），
+        # 如果不排除，会被误删导致 Go 包编译失败（如 yq 的 go-cty/internal/graphemes 缺失）。
+        find dl -size -1024c -not -path "dl/go-mod-cache/*" -exec ls -l {} \;
+        find dl -size -1024c -not -path "dl/go-mod-cache/*" -exec rm -f {} \;
+
+        # Go 模块缓存完整性兜底：
+        # 虽然上面的 find 命令已排除 dl/go-mod-cache/，但缓存中可能已有之前
+        # 构建误删的损坏模块。这里遍历所有 Go 包源码目录，运行 go mod download
+        # 确保依赖完整。用 set +e 包裹，避免找不到 Go 时导致整个步骤失败。
+        echo "=== 补全 Go 模块缓存 ==="
+        set +e
+        export GOPROXY=https://proxy.golang.org,direct
+        export GOFLAGS=-mod=mod
+        OPENWRT_DIR="$PWD"
+        GO_BIN=""
+        # 优先使用系统 Go（GitHub Actions 镜像可能预装），其次用 staging_dir 中的 Go
+        if command -v go >/dev/null 2>&1; then
+          GO_BIN="$(command -v go)"
+        else
+          GO_BIN="$(ls "$OPENWRT_DIR"/staging_dir/hostpkg/lib/go*/bin/go 2>/dev/null | head -1)"
+        fi
+        if [ -n "$GO_BIN" ]; then
+          echo "使用 Go: $GO_BIN ($("$GO_BIN" version 2>&1))"
+          # 遍历 feeds 和 package 中所有含 go.mod 的目录
+          find feeds package -name "go.mod" -not -path "*/build_dir/*" 2>/dev/null | while read gomod; do
+            dir=$(dirname "$gomod")
+            echo "  补全: $dir"
+            (cd "$OPENWRT_DIR/$dir" && GOMODCACHE="$OPENWRT_DIR/dl/go-mod-cache" "$GO_BIN" mod download 2>&1 | tail -3)
+          done
+          echo "Go 模块补全完成"
+        else
+          echo "警告: 未找到 Go 编译器，跳过模块补全（编译时 GOFLAGS=-mod=mod 仍会自动补全）"
+        fi
+        set -e
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        ccache -z
+        echo -e "$(nproc) thread compile"
+        # 先并行编译，失败时用 -j1 V=s 获取详细错误
+        make -j$(( $(nproc) + 1 )) || {
+          echo "=== 并行编译失败，使用 -j1 V=s 重新编译获取详细错误 ==="
+          make -j1 V=s 2>&1 | tail -300
+          exit 1
+        }
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d")" >> $GITHUB_ENV
+        ccache -s
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: ImmortalWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
+
+    - name: Organize files
+      id: organize
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "=== 生成的固件文件 ==="
+        ls -lh
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OneCloud-ImmortalWrt${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate release tag
+      id: tag
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y%m%d")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@master
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        retain_days: 0
+        keep_minimum_runs: 2
+
+    - name: Delete old releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

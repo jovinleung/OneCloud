@@ -1,0 +1,7 @@
+config TARGET_KERNEL_PARTSIZE
+	int
+	default 64
+
+config TARGET_ROOTFS_PARTSIZE
+	int
+	default 512
