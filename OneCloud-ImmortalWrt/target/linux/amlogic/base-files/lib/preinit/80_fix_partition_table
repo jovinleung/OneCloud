@@ -1,0 +1,67 @@
+#!/bin/sh
+# Ensure eMMC partition layout on boot: p2=512MB rootfs (boot), p3=remaining data
+# IMPORTANT: Never modify/delete p2 while rootfs is mounted on it!
+
+fix_partition_table() {
+	local emmc_dev dev mtype
+	local parted_info p2_line p2_start p2_size p2_end p2_flags disk_size
+	local p3_start p3_size
+
+	# Find eMMC device (distinguish from SD card via device type "MMC")
+	for dev in mmcblk1 mmcblk0; do
+		if [ -b "/dev/$dev" ]; then
+			mtype=$(cat "/sys/block/$dev/device/type" 2>/dev/null)
+			[ "$mtype" = "MMC" ] && emmc_dev="$dev" && break
+		fi
+	done
+	[ -z "$emmc_dev" ] && return 0
+
+	# Read partition table once (machine-parseable)
+	parted_info=$(parted -m "/dev/$emmc_dev" unit s print 2>/dev/null)
+	p2_line=$(echo "$parted_info" | grep "^2:")
+	p2_start=$(echo "$p2_line" | cut -d: -f2 | tr -d 's')
+	p2_end=$(echo "$p2_line" | cut -d: -f3 | tr -d 's')
+	p2_size=$(echo "$p2_line" | cut -d: -f4 | tr -d 's')
+	p2_flags=$(echo "$p2_line" | cut -d: -f7 | tr -d ';')
+	disk_size=$(cat "/sys/block/${emmc_dev}/size" 2>/dev/null)
+
+	# Validate all parsed values before any arithmetic
+	[ -z "$p2_start" ] || [ -z "$p2_size" ] || [ -z "$disk_size" ] && return 0
+
+	# Ensure p2 has boot flag (Amlogic U-Boot requires it)
+	if ! echo "$p2_flags" | grep -q "boot"; then
+		echo "fix_partition_table: setting boot flag on p2"
+		parted -s "/dev/$emmc_dev" set 2 boot on 2>/dev/null
+	fi
+
+	# If p3 already exists, nothing to do
+	if [ -b "/dev/${emmc_dev}p3" ]; then
+		echo "fix_partition_table: layout OK (p2=$((p2_size/2048))MB, p3 exists)"
+		return 0
+	fi
+
+	# p3 missing — calculate p3 start based on current p2 end
+	# Do NOT modify p2 while rootfs is mounted!
+	p3_start=$((p2_end + 1))
+	p3_start=$(( (p3_start + 2047) / 2048 * 2048 ))
+	p3_size=$((disk_size - p3_start))
+
+	# Need at least 1GB for p3
+	if [ "$p3_size" -lt 2097152 ]; then
+		echo "fix_partition_table: p2=$((p2_size/2048))MB, no space for p3 (need burn.img reflash to resize p2 to 512MB)"
+		return 0
+	fi
+
+	echo "fix_partition_table: p2=$((p2_size/2048))MB, creating p3 ($((p3_size/2048))MB) after p2"
+
+	parted -s "/dev/$emmc_dev" mkpart primary ext4 "${p3_start}s" 100% 2>/dev/null
+	partx -a "/dev/$emmc_dev" 2>/dev/null || partx -u "/dev/$emmc_dev" 2>/dev/null
+
+	if [ -b "/dev/${emmc_dev}p3" ]; then
+		echo "fix_partition_table: p3 created ($((p3_size/2048))MB)"
+	else
+		echo "fix_partition_table: WARNING: p3 creation failed"
+	fi
+}
+
+boot_hook_add preinit_mount_root fix_partition_table

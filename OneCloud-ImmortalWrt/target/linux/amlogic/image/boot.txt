@@ -1,0 +1,50 @@
+# OpenWrt boot script for Amlogic Meson8b (OneCloud)
+# Based on serial boot log analysis
+
+# Console settings
+setenv condev "console=ttyAML0,115200n8 no_console_suspend consoleblank=0"
+
+# eMMC device detection:
+# On OneCloud, SD card = mmc0, eMMC = mmc1
+# U-Boot log shows: "SDIO Port B: 0, SDIO Port C: 1"
+# eMMC is on SDIO Port C = mmc1
+if test -n "${emmc_dev}"; then
+    setenv root_dev "mmcblk${emmc_dev}p2"
+else
+    setenv emmc_dev "1"
+    setenv root_dev "mmcblk1p2"
+fi
+
+# Kernel command line
+setenv bootargs "root=/dev/${root_dev} rootfstype=ext4 rootwait ro ${condev} fsck.repair=yes net.ifnames=0 panic=3 oops=panic"
+
+# Optional MAC address
+if test -n "${mac}"; then
+    case "${mac}" in
+        *:*) setenv bootargs "${bootargs} mac=${mac}" ;;
+    esac
+fi
+
+# Load addresses (from serial log: kernel at 0x00208000, dtb at 0x21800000)
+setenv kernel_loadaddr "0x00208000"
+setenv dtb_loadaddr "0x21800000"
+
+# Try eMMC boot partition first
+echo "Loading kernel from eMMC ${emmc_dev}:1..."
+if fatload mmc ${emmc_dev}:1 ${kernel_loadaddr} kernel.img; then
+    echo "Loading DTB from eMMC ${emmc_dev}:1..."
+    if fatload mmc ${emmc_dev}:1 ${dtb_loadaddr} dtb.img; then
+        echo "Booting kernel..."
+        bootm ${kernel_loadaddr} - ${dtb_loadaddr}
+    fi
+fi
+
+# Fallback: try mmc0 (SD card)
+echo "Falling back to SD card (mmc0)..."
+if fatload mmc 0:1 ${kernel_loadaddr} kernel.img; then
+    if fatload mmc 0:1 ${dtb_loadaddr} dtb.img; then
+        bootm ${kernel_loadaddr} - ${dtb_loadaddr}
+    fi
+fi
+
+echo "ERROR: Failed to load kernel or DTB"

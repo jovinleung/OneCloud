@@ -1,0 +1,42 @@
+#!/bin/sh
+# Format and mount p3 data partition at /mnt/data
+
+[ -f /etc/.data_partition_created ] && exit 0
+
+# Find eMMC device
+EMMC_DEV=""
+for dev in mmcblk1 mmcblk0; do
+	if [ -b "/dev/$dev" ] && [ -d "/sys/block/$dev/device" ]; then
+		mtype=$(cat "/sys/block/$dev/device/type" 2>/dev/null)
+		[ "$mtype" = "MMC" ] && EMMC_DEV="$dev" && break
+	fi
+done
+[ -z "$EMMC_DEV" ] && exit 0
+
+# p3 should be created by preinit 80_fix_partition_table
+[ ! -b "/dev/${EMMC_DEV}p3" ] && exit 0
+
+# Format if not ext4
+if ! blkid "/dev/${EMMC_DEV}p3" 2>/dev/null | grep -q 'ext4'; then
+	mkfs.ext4 -F -L "data" "/dev/${EMMC_DEV}p3" 2>&1
+fi
+
+mkdir -p /mnt/data
+
+# Configure fstab
+uci -q delete fstab.data 2>/dev/null
+uci set fstab.data=mount
+uci set fstab.data.target='/mnt/data'
+uci set fstab.data.device="/dev/${EMMC_DEV}p3"
+uci set fstab.data.fstype='ext4'
+uci set fstab.data.options='rw,noatime'
+uci set fstab.data.enabled='1'
+uci commit fstab
+
+mount -t ext4 -o rw,noatime "/dev/${EMMC_DEV}p3" /mnt/data 2>&1
+mkdir -p /mnt/data/public
+chmod 777 /mnt/data/public
+
+touch /etc/.data_partition_created
+
+exit 0

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Copyright (C) 2014 OpenWrt.org
+# Move sysupgrade config backup from boot partition to /
+# In rootfs-only sysupgrade mode, boot partition (p1) is not flashed,
+# so config backup can be safely stored there.
+
+move_config() {
+	local bootdev
+	local partdev
+
+	if export_partdevice partdev 1 2>/dev/null; then
+		bootdev="/dev/$partdev"
+	else
+		for dev in mmcblk1p1 mmcblk0p1; do
+			[ -b "/dev/$dev" ] && bootdev="/dev/$dev" && break
+		done
+	fi
+
+	if [ -n "$bootdev" ] && [ -b "$bootdev" ]; then
+		mount -t vfat -o rw,noatime "$bootdev" /mnt 2>/dev/null
+		if [ -f /mnt/sysupgrade.tgz ]; then
+			cp -f /mnt/sysupgrade.tgz /sysupgrade.tgz 2>/dev/null
+			[ ! -f /sysupgrade.tgz ] && mount -o remount,rw / 2>/dev/null && cp -f /mnt/sysupgrade.tgz /sysupgrade.tgz 2>/dev/null
+			[ -f /sysupgrade.tgz ] && rm -f /mnt/sysupgrade.tgz
+		fi
+		umount /mnt 2>/dev/null
+	fi
+}
+
+boot_hook_add preinit_mount_root move_config
