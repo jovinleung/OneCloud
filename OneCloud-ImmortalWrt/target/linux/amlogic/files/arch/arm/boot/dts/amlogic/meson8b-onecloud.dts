@@ -38,20 +38,6 @@
 		reset-gpios = <&gpio BOOT_9 GPIO_ACTIVE_LOW>;
 	};
 
-	button {
-		compatible = "gpio-keys";
-
-		autorepeat;
-
-		reset-button {
-			label = "reset";
-			linux,code = <BTN_0>;
-
-			interrupt-parent = <&gpio_intc>;
-			interrupts = <5 IRQ_TYPE_LEVEL_LOW>; /* GPIOAO 5 */
-		};
-	};
-
 	leds {
 		compatible = "gpio-leds";
 
@@ -68,6 +54,16 @@
 		led_status_blue: status-blue {
 			label = "blue:status";
 			gpios = <&gpio_ao GPIOAO_4 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	gpio_keys {
+		compatible = "gpio-keys";
+
+		reset {
+			label = "reset";
+			gpios = <&gpio_ao GPIOAO_5 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
 		};
 	};
 
@@ -376,6 +372,9 @@
 	dr_mode = "otg";
 	usb-role-switch;
 	role-switch-default-mode = "host";
+	/* USB power supplies to avoid "supply vusb_d/vusb_a not found" warnings */
+	vusb_d-supply = <&vcc_5v>;
+	vusb_a-supply = <&vcc_5v>;
 };
 
 &usb0_phy {
@@ -384,6 +383,9 @@
 
 &usb1 {
 	status = "okay";
+	/* USB power supplies to avoid "supply vusb_d/vusb_a not found" warnings */
+	vusb_d-supply = <&vcc_5v>;
+	vusb_a-supply = <&vcc_5v>;
 };
 
 &usb1_phy {

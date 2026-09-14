@@ -1,22 +1,16 @@
 #!/bin/sh
 # Copyright (C) 2014 OpenWrt.org
+# Move sysupgrade config backup from boot partition to /
 
 move_config() {
 	local bootdev
 	local partdev
 
-	# Try export_partdevice first (standard method, may not be available in early preinit)
 	if export_partdevice partdev 1 2>/dev/null; then
 		bootdev="/dev/$partdev"
 	else
-		# Fallback: try known eMMC boot partitions on OneCloud
-		# (export_partdevice is not available in early preinit because
-		#  /lib/upgrade/common.sh hasn't been loaded yet)
 		for dev in mmcblk1p1 mmcblk0p1; do
-			if [ -b "/dev/$dev" ]; then
-				bootdev="/dev/$dev"
-				break
-			fi
+			[ -b "/dev/$dev" ] && bootdev="/dev/$dev" && break
 		done
 	fi
 
@@ -24,11 +18,7 @@ move_config() {
 		mount -o rw,noatime "$bootdev" /mnt 2>/dev/null
 		if [ -f /mnt/sysupgrade.tgz ]; then
 			cp -f /mnt/sysupgrade.tgz /sysupgrade.tgz 2>/dev/null
-			if [ ! -f /sysupgrade.tgz ]; then
-				# Rootfs may be read-only, try remount
-				mount -o remount,rw / 2>/dev/null
-				cp -f /mnt/sysupgrade.tgz /sysupgrade.tgz 2>/dev/null
-			fi
+			[ ! -f /sysupgrade.tgz ] && mount -o remount,rw / 2>/dev/null && cp -f /mnt/sysupgrade.tgz /sysupgrade.tgz 2>/dev/null
 			[ -f /sysupgrade.tgz ] && rm -f /mnt/sysupgrade.tgz
 		fi
 		umount /mnt 2>/dev/null

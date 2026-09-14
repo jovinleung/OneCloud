@@ -1,0 +1,63 @@
+#!/bin/sh
+# Fix partition table on boot: ensure p2=512MB, create p3 for data
+
+fix_partition_table() {
+	echo "fix_partition_table: START"
+
+	local emmc_dev=""
+	local dev
+
+	# Find eMMC device
+	for dev in mmcblk1 mmcblk0; do
+		if [ -b "/dev/$dev" ]; then
+			local mtype=$(cat "/sys/block/$dev/device/type" 2>/dev/null)
+			[ "$mtype" = "MMC" ] && emmc_dev="$dev" && break
+		fi
+	done
+
+	[ -z "$emmc_dev" ] && return 0
+	echo "fix_partition_table: eMMC device is $emmc_dev"
+
+	# Target rootfs size: 512MB (1048576 sectors)
+	local target_size=1048576
+
+	# Get current p2 info
+	local parted_info=$(parted -m "/dev/$emmc_dev" unit s print 2>/dev/null)
+	local p2_line=$(echo "$parted_info" | grep "^2:")
+	local p2_size=$(echo "$p2_line" | cut -d: -f4 | tr -d 's')
+	local p2_start=$(echo "$p2_line" | cut -d: -f2 | tr -d 's')
+	local disk_size=$(cat "/sys/block/${emmc_dev}/size" 2>/dev/null)
+
+	# Skip if p2 already correct size
+	if [ -n "$p2_size" ] && [ "$p2_size" -eq "$target_size" ]; then
+		echo "fix_partition_table: p2 already 512MB, skipping"
+		return 0
+	fi
+
+	echo "fix_partition_table: p2 current=$((p2_size/2048))MB, target=512MB"
+
+	# Calculate new partition boundaries
+	local new_p2_end=$((p2_start + target_size - 1))
+	local p3_start=$((p2_start + target_size))
+	p3_start=$(( (p3_start + 2047) / 2048 * 2048 ))
+	local p3_size=$((disk_size - p3_start))
+
+	# Need at least 1GB for p3
+	[ "$p3_size" -lt 2097152 ] && return 0
+
+	# Remove p3 first if exists (reverse order)
+	[ -b "/dev/${emmc_dev}p3" ] && parted -s "/dev/$emmc_dev" rm 3
+
+	# Recreate p2 (512MB) and p3 (remaining)
+	parted -s "/dev/$emmc_dev" rm 2
+	parted -s "/dev/$emmc_dev" mkpart primary ext4 "${p2_start}s" "${new_p2_end}s"
+	parted -s "/dev/$emmc_dev" set 2 boot on
+	parted -s "/dev/$emmc_dev" mkpart primary ext4 "${p3_start}s" 100%
+
+	# Re-read partition table
+	partx -u "/dev/$emmc_dev" 2>/dev/null
+
+	echo "fix_partition_table: DONE. p2=512MB, p3=$((p3_size/2048))MB"
+}
+
+boot_hook_add preinit_mount_root fix_partition_table

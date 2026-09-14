@@ -20,7 +20,12 @@ endef
 include $(INCLUDE_DIR)/target.mk
 
 DEFAULT_PACKAGES += \
+	samba4-server \
+	luci-app-samba4 \
+	luci-i18n-samba4-zh-cn \
+	wsdd2 \
 	e2fsprogs \
+	kmod-gpio-button-hotplug \
 	kmod-usb-storage \
 	kmod-usb-storage-uas \
 	kmod-usb-storage-extras \
@@ -66,16 +71,15 @@ DEFAULT_PACKAGES += \
 	luci-i18n-base-zh-cn \
 	luci-i18n-firewall-zh-cn \
 	luci-i18n-package-manager-zh-cn \
-	luci-i18n-ttyd-zh-cn \
-	luci-i18n-diskman-zh-cn \
-	luci-i18n-hd-idle-zh-cn \
 	luci-theme-argon \
 	luci-app-ttyd \
+	luci-i18n-ttyd-zh-cn \
 	luci-app-diskman \
+	luci-i18n-diskman-zh-cn \
 	luci-app-hd-idle \
+	luci-i18n-hd-idle-zh-cn \
 	luci-app-nikki \
-	luci-i18n-nikki-zh-cn \
-	mihomo-meta
+	luci-i18n-nikki-zh-cn
 
 KERNELNAME:=Image dtbs
 

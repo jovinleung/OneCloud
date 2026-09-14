@@ -1,0 +1,92 @@
+#!/bin/sh
+# OneCloud bypass router: LAN=192.168.2.2/24, gateway=192.168.2.1, DHCP off
+
+# uhttpd/rpcd timeouts (for LuCI firmware upload)
+uci set uhttpd.main.script_timeout='300'
+uci set uhttpd.main.network_timeout='60'
+uci set uhttpd.main.http_keepalive='60'
+uci set rpcd.@rpcd[0].timeout='300'
+uci commit uhttpd
+uci commit rpcd
+
+# Memory: /tmp=80% RAM, swappiness=10, cache_pressure=50
+if mount | grep -q "on /tmp type tmpfs"; then
+    mount -o remount,size=80% /tmp 2>/dev/null
+fi
+cat >> /etc/sysctl.conf << 'EOF'
+vm.swappiness=10
+vm.vfs_cache_pressure=50
+EOF
+sysctl -p /etc/sysctl.conf 2>/dev/null
+
+# Static IP
+uci set network.lan.proto='static'
+uci delete network.lan.ipaddr 2>/dev/null
+uci add_list network.lan.ipaddr='192.168.2.2/24'
+uci set network.lan.gateway='192.168.2.1'
+uci delete network.lan.dns 2>/dev/null
+uci add_list network.lan.dns='192.168.2.1'
+uci delete network.lan.ip6assign 2>/dev/null
+
+# Disable DHCP
+uci set dhcp.lan.ignore='1'
+
+# DNS: no redirection, use gateway as upstream
+uci delete dhcp.@dnsmasq[0].dns_redirect 2>/dev/null
+uci set dhcp.@dnsmasq[0].noresolv='1'
+uci set dhcp.@dnsmasq[0].localuse='1'
+uci set dhcp.@dnsmasq[0].nonwildcard='1'
+uci set dhcp.@dnsmasq[0].bind_dynamic='1'
+uci set dhcp.@dnsmasq[0].authoritative='0'
+uci set dhcp.@dnsmasq[0].rebind_protection='0'
+uci set dhcp.@dnsmasq[0].rebind_localhost='0'
+uci delete dhcp.@dnsmasq[0].server 2>/dev/null
+uci add_list dhcp.@dnsmasq[0].server='192.168.2.1'
+
+# Firewall: accept forwarding, no DNS redirect
+uci set firewall.@defaults[0].forward='ACCEPT'
+uci set firewall.@defaults[0].flow_offloading='1'
+uci set firewall.@defaults[0].syn_flood='0'
+uci delete firewall.dns_redirect 2>/dev/null
+uci delete firewall.dns_redirect6 2>/dev/null
+
+# System
+uci set system.@system[0].hostname='OneCloud'
+uci set system.@system[0].timezone='CST-8'
+uci set system.@system[0].zonename='Asia/Shanghai'
+
+# NTP (China)
+uci set system.ntp.enabled='1'
+uci delete system.ntp.server 2>/dev/null
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='time1.cloud.tencent.com'
+uci add_list system.ntp.server='cn.pool.ntp.org'
+
+# ZRam: 256MB lzo (config via system.@system[0], not system.@zram[0])
+uci set system.@system[0].zram_size_mb='256'
+uci set system.@system[0].zram_comp_algo='lzo'
+
+# Disable auto-mount (only p3 data mounted via fstab)
+uci set fstab.@global[0].auto_mount='0'
+uci set fstab.@global[0].anon_mount='0'
+
+# ttyd: auto login as root (no password, shows banner)
+uci set ttyd.@ttyd[0].command='/bin/login -f root'
+
+# Root: empty password
+passwd -d root 2>/dev/null
+
+uci commit network
+uci commit dhcp
+uci commit firewall
+uci commit system
+uci commit fstab
+uci commit ttyd
+
+# Disable unnecessary services
+if [ -x /etc/init.d/odhcpd ]; then
+	/etc/init.d/odhcpd stop 2>/dev/null
+	/etc/init.d/odhcpd disable 2>/dev/null
+fi
+
+exit 0

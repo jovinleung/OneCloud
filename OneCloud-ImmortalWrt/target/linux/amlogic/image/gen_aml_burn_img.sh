@@ -1,177 +1,107 @@
 #!/bin/sh
-#
-# gen_aml_burn_img.sh - Generate an Amlogic USB Burning Tool image from an
-# ext4-emmc.img disk image.
-#
-# Usage: gen_aml_burn_img.sh <input.emmc.img> <output.burn.img[.xz]>
-#
-# Steps:
-#   1. Locate or download the AmlImg tool (hzyitc/AmlImg)
-#   2. Locate or download the OneCloud u-boot (hzyitc/u-boot-onecloud)
-#   3. Read the MBR partition table from the input image
-#   4. Extract boot (FAT32) and rootfs (ext4) partitions
-#   5. Convert partitions to Android sparse format (.simg)
-#   6. Pack into Amlogic .burn.img format with AmlImg
-#   7. Optionally compress with xz if output ends in .xz
-#
-# Dependencies: curl, python3, dd, img2simg, xz (optional)
+# Generate Amlogic USB Burning Tool image from eMMC disk image
+# Usage: gen_aml_burn_img.sh <input.emmc.img> <output.burn.img>
 
 set -e
 
-# === Argument check ===
 INPUT_IMG="$1"
 OUTPUT_IMG="$2"
 
-if [ -z "$INPUT_IMG" ] || [ -z "$OUTPUT_IMG" ]; then
-    echo "Usage: $0 <input.emmc.img> <output.burn.img[.xz]>"
-    echo ""
-    echo "Examples:"
-    echo "  $0 immortalwrt-amlogic-meson8b-thunder-onecloud-ext4-emmc.img immortalwrt-onecloud.burn.img"
-    echo "  $0 immortalwrt-amlogic-meson8b-thunder-onecloud-ext4-emmc.img immortalwrt-onecloud.burn.img.xz"
-    exit 1
-fi
+[ -z "$INPUT_IMG" ] || [ -z "$OUTPUT_IMG" ] && { echo "Usage: $0 <input.emmc.img> <output.burn.img>"; exit 1; }
+[ ! -f "$INPUT_IMG" ] && { echo "ERROR: input file not found: $INPUT_IMG"; exit 1; }
 
-if [ ! -f "$INPUT_IMG" ]; then
-    echo "ERROR: input file not found: $INPUT_IMG"
-    exit 1
-fi
-
-# === Configuration ===
 AMLIMG_VERSION="v0.3.1"
-UBOOT_VERSION="build-20221028-0940"
-UBOOT_URL="https://github.com/hzyitc/u-boot-onecloud/releases/download/${UBOOT_VERSION}/eMMC.burn.img"
+UBOOT_URL="https://github.com/hzyitc/u-boot-onecloud/releases/download/build-20221028-0940/eMMC.burn.img"
 
-# Working directory (auto-cleaned on exit)
 WORKDIR=$(mktemp -d)
-cleanup() {
-    rm -rf "$WORKDIR"
-}
+cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
-# === Locate / build AmlImg ===
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# [1/6] Locate AmlImg (local, PATH, or download/build)
 echo "==> [1/6] Preparing AmlImg tool"
 
 detect_arch() {
-    local arch=$(uname -m)
-    case "$arch" in
+    case "$(uname -m)" in
         x86_64|amd64)  echo "linux_amd64" ;;
         aarch64|arm64) echo "linux_arm64" ;;
         armv7l|arm)    echo "linux_arm" ;;
         i386|i686)      echo "linux_386" ;;
-        *)
-            echo "ERROR: unsupported architecture: $arch" >&2
-            exit 1
-            ;;
+        *) echo "ERROR: unsupported arch: $(uname -m)" >&2; exit 1 ;;
     esac
 }
 
-AMLIMG_ARCH=$(detect_arch)
-OS_TYPE=$(uname -s)
+check_amlimg() {
+    [ -x "$1" ] || return 1
+    local fo=$(file "$1" 2>/dev/null) || return 1
+    case "$(uname -s)" in
+        Darwin) echo "$fo" | grep -q "Mach-O" || return 1 ;;
+        Linux)  echo "$fo" | grep -q "ELF"     || return 1 ;;
+    esac
+    return 0
+}
 
-# Search order: script dir (self-contained), PATH, STAGING_DIR, cwd
 find_amlimg() {
-    local script_dir="$(cd "$(dirname "$0")" && pwd)"
-    if [ -x "$script_dir/AmlImg" ]; then
-        echo "$script_dir/AmlImg"
-        return 0
-    fi
-    if command -v AmlImg &>/dev/null; then
-        command -v AmlImg
-        return 0
-    fi
-    if [ -n "$STAGING_DIR" ] && [ -x "$STAGING_DIR/host/bin/AmlImg" ]; then
-        echo "$STAGING_DIR/host/bin/AmlImg"
-        return 0
-    fi
-    if [ -x "./AmlImg" ]; then
-        echo "$(pwd)/AmlImg"
-        return 0
-    fi
+    check_amlimg "$SCRIPT_DIR/AmlImg" && { echo "$SCRIPT_DIR/AmlImg"; return 0; }
+    command -v AmlImg >/dev/null 2>&1 && check_amlimg "$(command -v AmlImg)" && { command -v AmlImg; return 0; }
+    [ -n "$STAGING_DIR" ] && check_amlimg "$STAGING_DIR/host/bin/AmlImg" && { echo "$STAGING_DIR/host/bin/AmlImg"; return 0; }
     return 1
 }
 
 AMLIMG=$(find_amlimg 2>/dev/null || true)
 if [ -z "$AMLIMG" ]; then
-    if [ "$OS_TYPE" = "Darwin" ]; then
-        # macOS: no prebuilt binaries, build from source with Go
-        echo "    macOS detected, building AmlImg from source (requires Go)..."
-        if ! command -v go &>/dev/null; then
-            echo "ERROR: Go is required to build AmlImg on macOS" >&2
-            echo "Install Go: brew install go" >&2
-            exit 1
-        fi
+    if [ "$(uname -s)" = "Darwin" ]; then
+        echo "    Building AmlImg from source for macOS..."
+        command -v go >/dev/null 2>&1 || { echo "ERROR: Go required" >&2; exit 1; }
         MAC_ARCH=$(uname -m)
-        case "$MAC_ARCH" in
-            arm64) GOARCH=arm64 ;;
-            x86_64) GOARCH=amd64 ;;
-            *)
-                echo "ERROR: unsupported macOS architecture: $MAC_ARCH" >&2
-                exit 1
-                ;;
-        esac
-        AMLIMG_SRC_DIR="$WORKDIR/AmlImg-src"
-        git clone --depth 1 https://github.com/hzyitc/AmlImg.git "$AMLIMG_SRC_DIR" >/dev/null 2>&1 || {
-            echo "ERROR: failed to clone AmlImg source" >&2
-            exit 1
-        }
-        ( cd "$AMLIMG_SRC_DIR" && GOOS=darwin GOARCH=$GOARCH go build -o "$WORKDIR/AmlImg" . ) >/dev/null 2>&1 || {
-            echo "ERROR: failed to build AmlImg (GOARCH=$GOARCH)" >&2
-            exit 1
-        }
+        case "$MAC_ARCH" in arm64) GOARCH=arm64 ;; x86_64) GOARCH=amd64 ;; *) echo "ERROR: unsupported macOS arch" >&2; exit 1 ;; esac
+        git clone --depth 1 https://github.com/hzyitc/AmlImg.git "$WORKDIR/AmlImg-src" >/dev/null 2>&1
+        (cd "$WORKDIR/AmlImg-src" && GOOS=darwin GOARCH=$GOARCH go build -o "$WORKDIR/AmlImg" .) >/dev/null 2>&1
         chmod +x "$WORKDIR/AmlImg"
         AMLIMG="$WORKDIR/AmlImg"
     else
-        # Linux: download prebuilt binary
-        echo "    Downloading AmlImg ${AMLIMG_VERSION} (${AMLIMG_ARCH})..."
-        AMLIMG_URL="https://github.com/hzyitc/AmlImg/releases/download/${AMLIMG_VERSION}/AmlImg_${AMLIMG_VERSION}_${AMLIMG_ARCH}"
-        curl -sL --fail -o "$WORKDIR/AmlImg" "$AMLIMG_URL" || {
-            echo "ERROR: failed to download AmlImg: $AMLIMG_URL" >&2
-            exit 1
-        }
+        echo "    Downloading AmlImg..."
+        AMLIMG_ARCH=$(detect_arch)
+        curl -sL --fail -o "$WORKDIR/AmlImg" \
+            "https://github.com/hzyitc/AmlImg/releases/download/${AMLIMG_VERSION}/AmlImg_${AMLIMG_VERSION}_${AMLIMG_ARCH}"
         chmod +x "$WORKDIR/AmlImg"
         AMLIMG="$WORKDIR/AmlImg"
     fi
 fi
 echo "    Using AmlImg: $AMLIMG"
 
-# === Obtain u-boot (prefer local file to avoid network dependency) ===
+# [2/6] Obtain u-boot
 echo "==> [2/6] Obtaining OneCloud u-boot"
 UBOOT_IMG="$WORKDIR/uboot.img"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ -f "$SCRIPT_DIR/u-boot-onecloud.img" ]; then
     cp "$SCRIPT_DIR/u-boot-onecloud.img" "$UBOOT_IMG"
-    echo "    Using local u-boot: $SCRIPT_DIR/u-boot-onecloud.img"
+    echo "    Using local u-boot"
 else
-    echo "    Downloading u-boot from GitHub..."
-    curl -sL --fail -o "$UBOOT_IMG" "$UBOOT_URL" || {
-        echo "ERROR: failed to download u-boot: $UBOOT_URL" >&2
-        exit 1
-    }
+    echo "    Downloading u-boot..."
+    curl -sL --fail -o "$UBOOT_IMG" "$UBOOT_URL"
 fi
 echo "    u-boot size: $(du -h "$UBOOT_IMG" | cut -f1)"
 
-# === Unpack u-boot ===
+# [3/6] Unpack u-boot base structure
 echo "==> [3/6] Unpacking u-boot base structure"
 BURN_DIR="$WORKDIR/burn"
 mkdir -p "$BURN_DIR"
 "$AMLIMG" unpack "$UBOOT_IMG" "$BURN_DIR/" >/dev/null
 echo "    Unpacked: $(ls "$BURN_DIR" | wc -l) files"
 
-# === Read MBR partition table ===
+# [4/6] Read MBR and extract partitions
 echo "==> [4/6] Reading partition table and extracting partitions"
 
 read_partitions() {
     python3 - "$INPUT_IMG" << 'PYEOF'
 import struct, sys
-
 with open(sys.argv[1], "rb") as f:
-    # MBR partition table starts at offset 0x1BE, each entry is 16 bytes
     f.seek(0x1BE)
     for i in range(4):
         entry = f.read(16)
-        if len(entry) < 16:
-            break
+        if len(entry) < 16: break
         part_type = entry[4]
         lba_start = struct.unpack("<I", entry[8:12])[0]
         num_sectors = struct.unpack("<I", entry[12:16])[0]
@@ -181,78 +111,84 @@ PYEOF
 }
 
 PARTITIONS=$(read_partitions)
-echo "    Partition table:"
 echo "$PARTITIONS" | while read idx type start sectors; do
-    size_mb=$((sectors * 512 / 1024 / 1024))
-    echo "      partition $idx: type=0x$(printf '%02x' $type), start=$start, size=${size_mb}MB"
+    echo "      partition $idx: type=0x$(printf '%02x' $type), start=$start, size=$((sectors*512/1024/1024))MB"
 done
 
-# Extract boot partition (first partition, usually FAT32)
 BOOT_INFO=$(echo "$PARTITIONS" | sed -n '1p')
 BOOT_START=$(echo "$BOOT_INFO" | awk '{print $3}')
 BOOT_SECTORS=$(echo "$BOOT_INFO" | awk '{print $4}')
 
-# Extract rootfs partition (second partition, usually ext4)
 ROOTFS_INFO=$(echo "$PARTITIONS" | sed -n '2p')
 ROOTFS_START=$(echo "$ROOTFS_INFO" | awk '{print $3}')
 ROOTFS_SECTORS=$(echo "$ROOTFS_INFO" | awk '{print $4}')
 
-if [ -z "$BOOT_START" ] || [ -z "$ROOTFS_START" ]; then
-    echo "ERROR: unable to read partition table" >&2
-    exit 1
-fi
-
-# Extract partitions
 dd if="$INPUT_IMG" of="$WORKDIR/boot.img" bs=512 skip="$BOOT_START" count="$BOOT_SECTORS" 2>/dev/null
-dd if="$INPUT_IMG" of="$WORKDIR/rootfs.img" bs=512 skip="$ROOTFS_START" count="$ROOTFS_SECTORS" 2>/dev/null
+dd if="$INPUT_IMG" of="$WORKDIR/rootfs_raw.img" bs=512 skip="$ROOTFS_START" count="$ROOTFS_SECTORS" 2>/dev/null
 echo "    boot partition: $(du -h "$WORKDIR/boot.img" | cut -f1)"
-echo "    rootfs partition: $(du -h "$WORKDIR/rootfs.img" | cut -f1)"
+echo "    rootfs partition: $(du -h "$WORKDIR/rootfs_raw.img" | cut -f1)"
 
-# === Convert to sparse format ===
-echo "==> [5/6] Converting to Android sparse format"
+# [5/6] Prepare rootfs and convert to sparse
+echo "==> [5/6] Preparing rootfs and converting to sparse"
 
-if ! command -v img2simg &>/dev/null; then
-    echo "ERROR: img2simg not found, please install android-tools" >&2
-    exit 1
+E2FSCK=""
+RESIZE2FS=""
+IMG2SIMG=""
+
+for p in /opt/homebrew/opt/e2fsprogs/sbin /opt/homebrew/sbin /usr/sbin /sbin; do
+    [ -x "$p/e2fsck" ] && E2FSCK="$p/e2fsck"
+    [ -x "$p/resize2fs" ] && RESIZE2FS="$p/resize2fs"
+done
+command -v e2fsck >/dev/null 2>&1 && E2FSCK="e2fsck"
+command -v resize2fs >/dev/null 2>&1 && RESIZE2FS="resize2fs"
+command -v img2simg >/dev/null 2>&1 && IMG2SIMG="img2simg"
+[ -x "/opt/homebrew/bin/img2simg" ] && IMG2SIMG="/opt/homebrew/bin/img2simg"
+
+ROOTFS_IMG="$WORKDIR/rootfs.img"
+cp "$WORKDIR/rootfs_raw.img" "$ROOTFS_IMG"
+
+# Fix filesystem and resize to exact size (prevents img2simg crashes)
+[ -n "$E2FSCK" ] && $E2FSCK -fy "$ROOTFS_IMG" >/dev/null 2>&1 || true
+if [ -n "$RESIZE2FS" ]; then
+    ROOTFS_SIZE_MB=$((ROOTFS_SECTORS * 512 / 1024 / 1024))
+    echo "    Resizing to ${ROOTFS_SIZE_MB}MB..."
+    $RESIZE2FS -f "$ROOTFS_IMG" ${ROOTFS_SIZE_MB}M >/dev/null 2>&1 || true
 fi
 
-img2simg "$WORKDIR/boot.img" "$BURN_DIR/boot.simg"
-img2simg "$WORKDIR/rootfs.img" "$BURN_DIR/rootfs.simg"
-echo "    boot.simg: $(du -h "$BURN_DIR/boot.simg" | cut -f1)"
-echo "    rootfs.simg: $(du -h "$BURN_DIR/rootfs.simg" | cut -f1)"
-
-# === Append partition commands ===
-cat >> "$BURN_DIR/commands.txt" << 'EOF'
+# Convert to sparse (fallback to raw if img2simg fails)
+if [ -n "$IMG2SIMG" ]; then
+    echo "    Converting to sparse format..."
+    if $IMG2SIMG "$WORKDIR/boot.img" "$BURN_DIR/boot.simg" 2>/dev/null && \
+       $IMG2SIMG "$ROOTFS_IMG" "$BURN_DIR/rootfs.simg" 2>/dev/null; then
+        echo "    boot.simg: $(du -h "$BURN_DIR/boot.simg" | cut -f1)"
+        echo "    rootfs.simg: $(du -h "$BURN_DIR/rootfs.simg" | cut -f1)"
+        cat >> "$BURN_DIR/commands.txt" << 'EOF'
 PARTITION:boot:sparse:boot.simg
 PARTITION:rootfs:sparse:rootfs.simg
 EOF
-
-# === Pack ===
-echo "==> [6/6] Packing Amlogic burn image"
-
-NEED_XZ=0
-FINAL_OUTPUT="$OUTPUT_IMG"
-case "$OUTPUT_IMG" in
-    *.xz)
-        NEED_XZ=1
-        FINAL_OUTPUT="$WORKDIR/output.burn.img"
-        ;;
-esac
-
-"$AMLIMG" pack "$FINAL_OUTPUT" "$BURN_DIR/" >/dev/null
-echo "    burn image size: $(du -h "$FINAL_OUTPUT" | cut -f1)"
-
-if [ "$NEED_XZ" -eq 1 ]; then
-    echo "    Compressing with xz..."
-    xz -6 --threads=0 -c "$FINAL_OUTPUT" > "$OUTPUT_IMG"
-    echo "    compressed size: $(du -h "$OUTPUT_IMG" | cut -f1)"
+    else
+        echo "    WARNING: img2simg failed, using raw partitions"
+        cp "$WORKDIR/boot.img" "$BURN_DIR/boot.img"
+        cp "$ROOTFS_IMG" "$BURN_DIR/rootfs.img"
+        cat >> "$BURN_DIR/commands.txt" << 'EOF'
+PARTITION:boot:sparse:boot.img
+PARTITION:rootfs:sparse:rootfs.img
+EOF
+    fi
+else
+    echo "    WARNING: img2simg not found, using raw partitions"
+    cp "$WORKDIR/boot.img" "$BURN_DIR/boot.img"
+    cp "$ROOTFS_IMG" "$BURN_DIR/rootfs.img"
+    cat >> "$BURN_DIR/commands.txt" << 'EOF'
+PARTITION:boot:sparse:boot.img
+PARTITION:rootfs:sparse:rootfs.img
+EOF
 fi
+
+# [6/6] Pack
+echo "==> [6/6] Packing Amlogic burn image"
+"$AMLIMG" pack "$OUTPUT_IMG" "$BURN_DIR/" >/dev/null
+echo "    burn image size: $(du -h "$OUTPUT_IMG" | cut -f1)"
 
 echo ""
 echo "Done! Burn image generated: $OUTPUT_IMG"
-echo ""
-echo "Usage:"
-echo "  1. Decompress if .xz: xz -d $OUTPUT_IMG"
-echo "  2. Open USB Burning Tool"
-echo "  3. File -> Import burn package -> select .burn.img"
-echo "  4. Connect device, click Start"

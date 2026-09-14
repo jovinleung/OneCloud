@@ -1,0 +1,33 @@
+#!/bin/sh
+# SMB share for /mnt/data (anonymous read/write)
+
+[ -f /etc/config/samba4 ] || exit 0
+
+uci set samba4.@samba[0].name='OneCloud'
+uci set samba4.@samba[0].description='OneCloud Network Disk'
+uci set samba4.@samba[0].workgroup='WORKGROUP'
+uci set samba4.@samba[0].charset='UTF-8'
+uci set samba4.@samba[0].interfaces='br-lan'
+uci set samba4.@samba[0].allow_guests='1'
+uci set samba4.@samba[0].home_mode='0'
+uci set samba4.@samba[0].macos='1'
+
+uci -q delete samba4.data 2>/dev/null
+uci set samba4.data=sambashare
+uci set samba4.data.name='OneCloud'
+uci set samba4.data.path='/mnt/data'
+uci set samba4.data.read_only='no'
+uci set samba4.data.guest_ok='yes'
+uci set samba4.data.create_mask='0777'
+uci set samba4.data.directory_mask='0777'
+uci set samba4.data.force_root='1'
+uci commit samba4
+
+mkdir -p /mnt/data/public
+chmod 777 /mnt/data /mnt/data/public
+chown root:root /mnt/data /mnt/data/public
+
+[ -x /etc/init.d/samba4 ] && /etc/init.d/samba4 enable 2>/dev/null && /etc/init.d/samba4 restart 2>/dev/null
+[ -x /etc/init.d/wsdd2 ] && /etc/init.d/wsdd2 enable 2>/dev/null && /etc/init.d/wsdd2 restart 2>/dev/null
+
+exit 0

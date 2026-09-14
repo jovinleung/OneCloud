@@ -1,0 +1,38 @@
+#!/bin/sh
+# Copyright (C) 2024 OpenWrt.org
+
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+case "$(board_name)" in
+thunder,onecloud)
+	ucidef_set_interface_lan "eth0"
+
+	# Stable MAC from eMMC CID
+	cid=""
+	for dev in mmcblk1 mmcblk0; do
+		if [ -f "/sys/block/$dev/device/cid" ]; then
+			mtype=$(cat "/sys/block/$dev/device/type" 2>/dev/null)
+			if [ "$mtype" = "MMC" ]; then
+				cid=$(cat "/sys/block/$dev/device/cid" 2>/dev/null)
+				[ -n "$cid" ] && break
+			fi
+		fi
+	done
+
+	if [ -n "$cid" ]; then
+		b1=$(echo "$cid" | cut -c3-4)
+		b2=$(echo "$cid" | cut -c5-6)
+		b3=$(echo "$cid" | cut -c7-8)
+		b4=$(echo "$cid" | cut -c9-10)
+		b5=$(echo "$cid" | cut -c11-12)
+		[ -n "$b1" ] && [ -n "$b2" ] && [ -n "$b3" ] && [ -n "$b4" ] && [ -n "$b5" ] && \
+			ucidef_set_interface_macaddr "lan" "02:${b1}:${b2}:${b3}:${b4}:${b5}"
+	fi
+	;;
+esac
+
+board_config_flush
+
+exit 0
