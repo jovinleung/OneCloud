@@ -34,6 +34,17 @@
 		reset-gpios = <&gpio BOOT_9 GPIO_ACTIVE_LOW>;
 	};
 
+	gpio_keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <20>;
+
+		reset {
+			label = "reset";
+			gpios = <&gpio_ao GPIOAO_5 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+	};
+
 	leds {
 		compatible = "gpio-leds";
 
@@ -50,17 +61,6 @@
 		led_status_blue: status-blue {
 			label = "blue:status";
 			gpios = <&gpio_ao GPIOAO_4 GPIO_ACTIVE_HIGH>;
-		};
-	};
-
-	gpio_keys {
-		compatible = "gpio-keys-polled";
-		poll-interval = <20>;
-
-		reset {
-			label = "reset";
-			gpios = <&gpio_ao GPIOAO_5 GPIO_ACTIVE_LOW>;
-			linux,code = <KEY_RESTART>;
 		};
 	};
 
