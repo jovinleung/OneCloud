@@ -56,15 +56,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses5-dev \
-            libssl-dev python3-setuptools rsync swig unzip zlib1g-dev \
-            file wget python3 python3-dev xsltproc libelf-dev \
-            ecj java-propose-classpath antlr1.7 libantlr3c-dev \
-            asciidoc bash bc binutils bzip2 cpio fastjar flex \
-            gtk2.0 intltool jikespg libboost1.71-dev libgtk2.0-dev \
-            libusb-1.0-0-dev make mkisofs openssl patch perl-base \
-            python3-distutils python3-pyelftools qemu-utils sharutils \
-            subversion texinfo uglifyjs xmlto
+            gcc-multilib g++-multilib gettext git \
+            libncurses-dev libssl-dev \
+            python3-setuptools python3-dev \
+            rsync swig unzip zlib1g-dev file wget \
+            xsltproc libelf-dev time bc cpio \
+            libboost-dev
           # apk-tools (用于生成索引和签名)
           sudo apt-get install -y apk-tools || true
 
