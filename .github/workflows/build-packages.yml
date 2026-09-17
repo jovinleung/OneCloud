@@ -1,0 +1,279 @@
+# ImmortalWrt 软件包自动构建 & 发布为 APK 软件源
+# 触发条件: push 到 main 分支 / 手动触发 / 每月 1 日定时构建
+name: Build Packages & Publish Repo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.config'
+      - 'files/**'
+      - '.github/workflows/build-packages.yml'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'ImmortalWrt 分支'
+        required: true
+        default: 'master'
+      extra_packages:
+        description: '额外编译的软件包 (空格分隔)'
+        required: false
+        default: ''
+  schedule:
+    - cron: '0 0 1 * *'  # 每月 1 日 UTC 00:00
+
+env:
+  # ===== 目标平台配置 (根据需要修改) =====
+  TARGET: amlogic
+  SUBTARGET: meson8b
+  DEVICE: thunder-onecloud
+  ARCH: arm_cortex-a5_vfpv4
+  # ImmortalWrt 源码分支 (workflow_dispatch 可覆盖)
+  IMMORTALWRT_BRANCH: master
+  # 要编译的软件包列表 (空格分隔, 留空则编译 .config 中选中的所有包)
+  PACKAGES: ''
+  # 并发数
+  JOBS: 8
+
+jobs:
+  build:
+    name: Build ${{ env.TARGET }}/${{ env.SUBTARGET }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      # ============================================================
+      # 1. 检出当前仓库 (存放自定义配置/文件)
+      # ============================================================
+      - name: Checkout custom repo
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. 安装编译依赖
+      # ============================================================
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev \
+            libssl-dev python3-setuptools rsync swig unzip zlib1g-dev \
+            file wget python3 python3-dev xsltproc libelf-dev \
+            ecj java-propose-classpath antlr1.7 libantlr3c-dev \
+            asciidoc bash bc binutils bzip2 cpio fastjar flex \
+            gtk2.0 intltool jikespg libboost1.71-dev libgtk2.0-dev \
+            libusb-1.0-0-dev make mkisofs openssl patch perl-base \
+            python3-distutils python3-pyelftools qemu-utils sharutils \
+            subversion texinfo uglifyjs xmlto
+          # apk-tools (用于生成索引和签名)
+          sudo apt-get install -y apk-tools || true
+
+      # ============================================================
+      # 3. ccache 缓存 (加速后续构建)
+      # ============================================================
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ env.TARGET }}-${{ env.SUBTARGET }}-
+
+      # ============================================================
+      # 4. 克隆 ImmortalWrt 源码
+      # ============================================================
+      - name: Clone ImmortalWrt source
+        run: |
+          BRANCH="${{ github.event.inputs.branch || env.IMMORTALWRT_BRANCH }}"
+          echo "Cloning ImmortalWrt branch: $BRANCH"
+          git clone --depth 1 --branch "$BRANCH" https://github.com/immortalwrt/immortalwrt.git immortalwrt
+          cd immortalwrt
+          # 保留完整历史以便 feeds 更新
+          git pull --unshallow || true
+
+      # ============================================================
+      # 5. 更新并安装 feeds
+      # ============================================================
+      - name: Update & install feeds
+        run: |
+          cd immortalwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ============================================================
+      # 6. 加载自定义配置
+      #    优先使用仓库根目录的 .config, 否则用 defconfig
+      # ============================================================
+      - name: Load custom config
+        run: |
+          cd immortalwrt
+          if [ -f "$GITHUB_WORKSPACE/.config" ]; then
+            echo "Using custom .config from repo"
+            cp "$GITHUB_WORKSPACE/.config" .config
+          else
+            echo "Using defconfig for $TARGET/$SUBTARGET"
+            make defconfig CONFIG_TARGET_${TARGET}=y CONFIG_TARGET_${TARGET}_${SUBTARGET}=y
+          fi
+          # 应用自定义文件 (如果仓库有 files/ 目录)
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+            echo "Copying custom files/"
+            cp -r "$GITHUB_WORKSPACE/files/"* package/base-files/files/ 2>/dev/null || true
+          fi
+          # 旧配置处理
+          make oldconfig
+
+      # ============================================================
+      # 7. 下载源码包 (提前下载, 避免编译时网络问题)
+      # ============================================================
+      - name: Download sources
+        run: |
+          cd immortalwrt
+          make download -j$JOBS V=s
+
+      # ============================================================
+      # 8. 编译工具链 + 软件包
+      # ============================================================
+      - name: Build toolchain & packages
+        run: |
+          cd immortalwrt
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          # 编译工具链
+          make toolchain/install -j$JOBS
+          # 编译选中的软件包
+          EXTRA="${{ github.event.inputs.extra_packages || env.PACKAGES }}"
+          if [ -n "$EXTRA" ]; then
+            echo "Building extra packages: $EXTRA"
+            for pkg in $EXTRA; do
+              make package/$pkg/compile -j$JOBS || true
+            done
+          fi
+          # 编译所有选中的软件包
+          make package/compile -j$JOBS
+          # 打包
+          make package/index -j$JOBS
+
+      # ============================================================
+      # 9. 收集编译好的 .apk 包
+      # ============================================================
+      - name: Collect .apk packages
+        run: |
+          cd immortalwrt
+          mkdir -p "$GITHUB_WORKSPACE/repo/$ARCH"
+          # 从 bin/packages 收集所有 .apk
+          find bin/packages -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/repo/$ARCH/" \;
+          # 也收集 target 特定的包
+          find bin/targets -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/repo/$ARCH/" \; 2>/dev/null || true
+          echo "Collected packages:"
+          ls -lh "$GITHUB_WORKSPACE/repo/$ARCH/" | head -30
+          echo "Total: $(ls $GITHUB_WORKSPACE/repo/$ARCH/*.apk | wc -l) packages"
+
+      # ============================================================
+      # 10. 生成 APK 索引 (packages.adb)
+      # ============================================================
+      - name: Generate APK index
+        run: |
+          cd "$GITHUB_WORKSPACE/repo/$ARCH"
+          # 生成索引
+          apk index --output packages.adb --rewrite-arch "$ARCH" *.apk
+          echo "Index generated:"
+          ls -lh packages.adb
+
+      # ============================================================
+      # 11. 签名 (如果配置了 APK_SIGNING_KEY secret)
+      #     生成密钥: openssl genrsa -out repo.key 2048
+      #     公钥: openssl rsa -in repo.key -pubout -out repo.pem
+      #     将 repo.key 内容存入 GitHub Secrets: APK_SIGNING_KEY
+      # ============================================================
+      - name: Sign index
+        if: ${{ secrets.APK_SIGNING_KEY != '' }}
+        run: |
+          cd "$GITHUB_WORKSPACE/repo/$ARCH"
+          # 从 secret 恢复私钥
+          echo "${{ secrets.APK_SIGNING_KEY }}" > repo.key
+          # 签名
+          apk sign --sign-key repo.key packages.adb
+          # 导出公钥 (供设备下载)
+          openssl rsa -in repo.key -pubout -out "$GITHUB_WORKSPACE/repo/public-key.pem"
+          # 清理私钥
+          rm -f repo.key
+          echo "Signed:"
+          ls -lh packages.adb packages.adb.sig 2>/dev/null || true
+
+      # ============================================================
+      # 12. 生成 README (软件源使用说明)
+      # ============================================================
+      - name: Generate README
+        run: |
+          REPO_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          cat > "$GITHUB_WORKSPACE/repo/README.md" << EOF
+          # ${{ github.event.repository.name }} APK Repository
+
+          ImmortalWrt / OpenWrt 软件源 (apk 格式)
+
+          ## 添加软件源
+
+          \`\`\`bash
+          # 下载公钥 (如果已签名)
+          wget -O /etc/apk/keys/repo.pem $REPO_URL/public-key.pem
+
+          # 添加源
+          echo "$REPO_URL/$ARCH/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+
+          # 更新
+          apk update
+          \`\`\`
+
+          ## 架构
+
+          - \`$ARCH\`
+
+          ## 软件包数量
+
+          $(ls $GITHUB_WORKSPACE/repo/$ARCH/*.apk 2>/dev/null | wc -l) 个软件包
+
+          ## 构建信息
+
+          - 平台: $TARGET/$SUBTARGET
+          - 设备: $DEVICE
+          - 构建时间: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - 触发: ${{ github.event_name }}
+          EOF
+          cat "$GITHUB_WORKSPACE/repo/README.md"
+
+      # ============================================================
+      # 13. 上传构建产物 (artifact, 可直接下载)
+      # ============================================================
+      - name: Upload repo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-repo-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          path: repo/
+          retention-days: 30
+
+      # ============================================================
+      # 14. 部署到 GitHub Pages
+      # ============================================================
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./repo
+          force_orphan: true
+
+  # ==============================================================
+  # Pages 部署 (需要在仓库 Settings > Pages 中启用 GitHub Actions 部署)
+  # ==============================================================
+  deploy-pages:
+    name: Deploy Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
