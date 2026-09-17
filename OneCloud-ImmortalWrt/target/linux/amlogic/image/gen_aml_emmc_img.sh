@@ -3,7 +3,7 @@
 # Copyright (C) 2017 OpenWrt.org
 #
 # Generate Amlogic eMMC disk image:
-#   bootloader at sector 1, resource at 12MB, MBR: boot(FAT) + rootfs(ext4)
+#   bootloader at sector 1, resource at 12MB, MBR: boot(FAT) + rootfs(ext4) + data(ext4)
 
 [ $# -eq 5 ] || {
     echo "SYNTAX: $0 <file> <bootfs image> <rootfs image> <bootfs size> <rootfs size>"
@@ -16,6 +16,10 @@ ROOTFS="$3"
 BOOTFSSIZE="$4"
 ROOTFSSIZE="$5"
 
+# eMMC total size in MB (OneCloud 8GB eMMC actual usable ~7.28GB)
+# p3 (data partition) will fill the remaining space after p2
+EMMC_SIZE_MB="${EMMC_SIZE_MB:-7424}"
+
 # Use real rootfs size if larger
 if [ -f "$ROOTFS" ]; then
     ROOTFS_REAL_SIZE=$(wc -c < "$ROOTFS" | tr -d ' ')
@@ -26,18 +30,41 @@ fi
 head=4
 sect=2048
 
-# Generate MBR: p1=FAT(c), p2=Linux(83). Filter ptgen output to pure numbers only.
-set -- $(ptgen -o $OUTPUT -h $head -s $sect -l 32768 -t c -p ${BOOTFSSIZE}M -t 83 -p ${ROOTFSSIZE}M | grep -E '^[0-9]+$')
+# Step 1: Generate MBR with p1+p2 only to get p2 end offset
+TMP_PT=$(mktemp)
+set -- $(ptgen -o "$TMP_PT" -h $head -s $sect -l 32768 -t c -p ${BOOTFSSIZE}M -t 83 -p ${ROOTFSSIZE}M | grep -E '^[0-9]+$')
+P2_OFFSET_BYTES="$3"
+P2_SIZE_BYTES="$4"
+P2_END_MB=$(( (P2_OFFSET_BYTES + P2_SIZE_BYTES) / 1024 / 1024 ))
+rm -f "$TMP_PT"
+
+# Step 2: Calculate p3 size (remaining space, aligned to 4MB cylinder)
+P3_SIZE_MB=$(( EMMC_SIZE_MB - P2_END_MB ))
+# Align down to 4MB (cylinder size = head*sect = 4*2048 = 8192 sectors = 4MB)
+P3_SIZE_MB=$(( P3_SIZE_MB - (P3_SIZE_MB % 4) ))
+
+echo "    eMMC total: ${EMMC_SIZE_MB}MB"
+echo "    p2 end at: ${P2_END_MB}MB"
+echo "    p3 (data) size: ${P3_SIZE_MB}MB"
+
+# Step 3: Generate MBR with p1=FAT(c), p2=Linux(83), p3=Linux(83)
+set -- $(ptgen -o $OUTPUT -h $head -s $sect -l 32768 \
+    -t c -p ${BOOTFSSIZE}M \
+    -t 83 -p ${ROOTFSSIZE}M \
+    -t 83 -p ${P3_SIZE_MB}M | grep -E '^[0-9]+$')
 
 BOOTOFFSET="$(($1 / 512))"
 BOOTSIZE="$(($2 / 512))"
 ROOTFSOFFSET="$(($3 / 512))"
 ROOTFSSIZE="$(($4 / 512))"
+DATAOFFSET="$(($5 / 512))"
+DATASIZE="$(($6 / 512))"
 
 echo "    boot partition: offset=$BOOTOFFSET sectors, size=$((BOOTSIZE*512/1024/1024))MB"
 echo "    rootfs partition: offset=$ROOTFSOFFSET sectors, size=$((ROOTFSSIZE*512/1024/1024))MB"
+echo "    data partition: offset=$DATAOFFSET sectors, size=$((DATASIZE*512/1024/1024))MB"
 
-# Write partitions
+# Write partitions (p3 left unformatted/zero for user data)
 dd bs=512 if="$BOOTFS" of="$OUTPUT" seek="$BOOTOFFSET" conv=notrunc 2>/dev/null
 dd bs=512 if="$ROOTFS" of="$OUTPUT" seek="$ROOTFSOFFSET" conv=notrunc 2>/dev/null
 
