@@ -106,14 +106,18 @@ jobs:
             echo "Using custom .config from repo"
             cp "$GITHUB_WORKSPACE/.config" .config
           else
-            echo "Using defconfig"
-            make defconfig
+            echo "Using defconfig for $TARGET/$SUBTARGET"
+            make defconfig \
+              CONFIG_TARGET_${TARGET}=y \
+              CONFIG_TARGET_${TARGET}_${SUBTARGET}=y
           fi
           if [ -d "$GITHUB_WORKSPACE/files" ]; then
             echo "Copying custom files/"
             cp -r "$GITHUB_WORKSPACE/files/"* package/base-files/files/ 2>/dev/null || true
           fi
           make oldconfig
+          # 验证目标平台
+          grep -E "CONFIG_TARGET_(BOARD|SUBTARGET)" .config | head -5
 
       # ============================================================
       # 7. 下载源码包
@@ -126,19 +130,29 @@ jobs:
       # ============================================================
       # 8. 编译工具链 + 软件包
       # ============================================================
-      - name: Build toolchain & packages
+      - name: Build toolchain, kernel & packages
         run: |
           cd immortalwrt
           export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          # 1. 编译工具链
+          echo "=== Building toolchain ==="
           make toolchain/install -j$JOBS
+          # 2. 编译内核 (内核模块依赖)
+          echo "=== Building kernel ==="
+          make target/linux/compile -j$JOBS
+          # 3. 编译额外指定的软件包
           EXTRA="${{ github.event.inputs.extra_packages || env.PACKAGES }}"
           if [ -n "$EXTRA" ]; then
-            echo "Building extra packages: $EXTRA"
+            echo "=== Building extra packages: $EXTRA ==="
             for pkg in $EXTRA; do
               make package/$pkg/compile -j$JOBS || true
             done
           fi
+          # 4. 编译所有选中的软件包
+          echo "=== Building all packages ==="
           make package/compile -j$JOBS
+          # 5. 生成软件包索引
+          echo "=== Building package index ==="
           make package/index -j$JOBS
 
       # ============================================================
