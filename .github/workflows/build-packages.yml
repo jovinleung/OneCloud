@@ -37,7 +37,7 @@ env:
 
 jobs:
   build:
-    name: Build ${{ env.TARGET }}/${{ env.SUBTARGET }}
+    name: Build amlogic/meson8b
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -75,9 +75,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ github.sha }}
+          key: ccache-amlogic-meson8b-${{ github.sha }}
           restore-keys: |
-            ccache-${{ env.TARGET }}-${{ env.SUBTARGET }}-
+            ccache-amlogic-meson8b-
 
       # ============================================================
       # 4. 克隆 ImmortalWrt 源码
@@ -88,7 +88,6 @@ jobs:
           echo "Cloning ImmortalWrt branch: $BRANCH"
           git clone --depth 1 --branch "$BRANCH" https://github.com/immortalwrt/immortalwrt.git immortalwrt
           cd immortalwrt
-          # 保留完整历史以便 feeds 更新
           git pull --unshallow || true
 
       # ============================================================
@@ -102,7 +101,6 @@ jobs:
 
       # ============================================================
       # 6. 加载自定义配置
-      #    优先使用仓库根目录的 .config, 否则用 defconfig
       # ============================================================
       - name: Load custom config
         run: |
@@ -111,19 +109,17 @@ jobs:
             echo "Using custom .config from repo"
             cp "$GITHUB_WORKSPACE/.config" .config
           else
-            echo "Using defconfig for $TARGET/$SUBTARGET"
-            make defconfig CONFIG_TARGET_${TARGET}=y CONFIG_TARGET_${TARGET}_${SUBTARGET}=y
+            echo "Using defconfig"
+            make defconfig
           fi
-          # 应用自定义文件 (如果仓库有 files/ 目录)
           if [ -d "$GITHUB_WORKSPACE/files" ]; then
             echo "Copying custom files/"
             cp -r "$GITHUB_WORKSPACE/files/"* package/base-files/files/ 2>/dev/null || true
           fi
-          # 旧配置处理
           make oldconfig
 
       # ============================================================
-      # 7. 下载源码包 (提前下载, 避免编译时网络问题)
+      # 7. 下载源码包
       # ============================================================
       - name: Download sources
         run: |
@@ -137,9 +133,7 @@ jobs:
         run: |
           cd immortalwrt
           export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
-          # 编译工具链
           make toolchain/install -j$JOBS
-          # 编译选中的软件包
           EXTRA="${{ github.event.inputs.extra_packages || env.PACKAGES }}"
           if [ -n "$EXTRA" ]; then
             echo "Building extra packages: $EXTRA"
@@ -147,9 +141,7 @@ jobs:
               make package/$pkg/compile -j$JOBS || true
             done
           fi
-          # 编译所有选中的软件包
           make package/compile -j$JOBS
-          # 打包
           make package/index -j$JOBS
 
       # ============================================================
@@ -159,13 +151,10 @@ jobs:
         run: |
           cd immortalwrt
           mkdir -p "$GITHUB_WORKSPACE/repo/$ARCH"
-          # 从 bin/packages 收集所有 .apk
           find bin/packages -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/repo/$ARCH/" \;
-          # 也收集 target 特定的包
           find bin/targets -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/repo/$ARCH/" \; 2>/dev/null || true
-          echo "Collected packages:"
+          echo "Total: $(ls $GITHUB_WORKSPACE/repo/$ARCH/*.apk 2>/dev/null | wc -l) packages"
           ls -lh "$GITHUB_WORKSPACE/repo/$ARCH/" | head -30
-          echo "Total: $(ls $GITHUB_WORKSPACE/repo/$ARCH/*.apk | wc -l) packages"
 
       # ============================================================
       # 10. 生成 APK 索引 (packages.adb)
@@ -173,34 +162,34 @@ jobs:
       - name: Generate APK index
         run: |
           cd "$GITHUB_WORKSPACE/repo/$ARCH"
-          # 生成索引
           apk index --output packages.adb --rewrite-arch "$ARCH" *.apk
           echo "Index generated:"
           ls -lh packages.adb
 
       # ============================================================
-      # 11. 签名 (如果配置了 APK_SIGNING_KEY secret)
+      # 11. 签名 (配置 APK_SIGNING_KEY secret 时自动签名)
       #     生成密钥: openssl genrsa -out repo.key 2048
       #     公钥: openssl rsa -in repo.key -pubout -out repo.pem
       #     将 repo.key 内容存入 GitHub Secrets: APK_SIGNING_KEY
       # ============================================================
       - name: Sign index
-        if: ${{ secrets.APK_SIGNING_KEY != '' }}
+        env:
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
         run: |
           cd "$GITHUB_WORKSPACE/repo/$ARCH"
-          # 从 secret 恢复私钥
-          echo "${{ secrets.APK_SIGNING_KEY }}" > repo.key
-          # 签名
-          apk sign --sign-key repo.key packages.adb
-          # 导出公钥 (供设备下载)
-          openssl rsa -in repo.key -pubout -out "$GITHUB_WORKSPACE/repo/public-key.pem"
-          # 清理私钥
-          rm -f repo.key
-          echo "Signed:"
-          ls -lh packages.adb packages.adb.sig 2>/dev/null || true
+          if [ -n "$APK_SIGNING_KEY" ]; then
+            echo "$APK_SIGNING_KEY" > repo.key
+            apk sign --sign-key repo.key packages.adb
+            openssl rsa -in repo.key -pubout -out "$GITHUB_WORKSPACE/repo/public-key.pem"
+            rm -f repo.key
+            echo "Signed successfully"
+            ls -lh packages.adb packages.adb.sig 2>/dev/null || true
+          else
+            echo "No APK_SIGNING_KEY secret configured, skipping signature"
+          fi
 
       # ============================================================
-      # 12. 生成 README (软件源使用说明)
+      # 12. 生成 README
       # ============================================================
       - name: Generate README
         run: |
@@ -241,12 +230,12 @@ jobs:
           cat "$GITHUB_WORKSPACE/repo/README.md"
 
       # ============================================================
-      # 13. 上传构建产物 (artifact, 可直接下载)
+      # 13. 上传构建产物
       # ============================================================
       - name: Upload repo artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apk-repo-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          name: apk-repo-amlogic-meson8b
           path: repo/
           retention-days: 30
 
@@ -259,21 +248,3 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./repo
           force_orphan: true
-
-  # ==============================================================
-  # Pages 部署 (需要在仓库 Settings > Pages 中启用 GitHub Actions 部署)
-  # ==============================================================
-  deploy-pages:
-    name: Deploy Pages
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
