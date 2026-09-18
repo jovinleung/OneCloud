@@ -14,8 +14,7 @@ FAT32_BLOCKS=$(shell echo $$(($(CONFIG_TARGET_KERNEL_PARTSIZE)*1024)))
 define Build/boot-partition
 	mkimage -A arm -O linux -T script -C none -a 0 -e 0 -n "boot.scr" \
 		-d $(TOPDIR)/target/linux/amlogic/image/boot.txt $@.boot.scr
-	mkfs.fat -C $@ $(FAT32_BLOCKS)
-	mlabel -i $@ ::boot
+	mkfs.fat -n boot -C $@ $(FAT32_BLOCKS)
 	mcopy -i $@ $@.boot.scr ::boot.scr
 	mcopy -i $@ $(IMAGE_KERNEL) ::kernel.img
 	mcopy -i $@ $(DTS_DIR)/$(DEVICE_DTS).dtb ::dtb.img
