@@ -21,8 +21,10 @@ done
 
 # --- Network performance tuning ---
 # Increase NIC ring buffers to max (1024) to reduce drops under bursty load
+# Enable offloads (GRO/GSO/TSO) to reduce CPU overhead on forwarding
 if command -v ethtool >/dev/null 2>&1; then
 	ethtool -G eth0 rx 1024 tx 1024 >/dev/null 2>&1
+	ethtool -K eth0 gro on gso on tso on rx on tx on >/dev/null 2>&1
 fi
 
 # RPS/XPS: managed by the packet_steering service (enabled via uci-defaults

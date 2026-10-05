@@ -115,6 +115,14 @@ chmod 600 /etc/crontabs/root
 # irqbalance: spread NIC IRQs across 4 cores (eth0 IRQ was pinned to CPU0)
 [ -x /etc/init.d/irqbalance ] && /etc/init.d/irqbalance enable 2>/dev/null && /etc/init.d/irqbalance start 2>/dev/null
 
+# zram-swap: 256MB compressed swap (LZ4) on 1GB RAM device
+if uci -q get zram-swap.@zram-swap[0] > /dev/null 2>&1; then
+	uci set zram-swap.@zram-swap[0].size='256'
+	uci set zram-swap.@zram-swap[0].comp_algo='lz4'
+	uci commit zram-swap
+	[ -x /etc/init.d/zram-swap ] && /etc/init.d/zram-swap enable 2>/dev/null
+fi
+
 # Nikki: do not preset start_delay — boot() runs in background and a long
 # sleep can cause the deferred start to be lost, resulting in no auto-start.
 # GeoIP download retry is handled by mihomo itself.

@@ -45,13 +45,13 @@ section=$(uci add fstab mount)
 uci set "fstab.${section}.target=/mnt/data"
 uci set "fstab.${section}.device=$DATA_PART"
 uci set "fstab.${section}.fstype=ext4"
-uci set "fstab.${section}.options=rw,noatime,commit=60"
+uci set "fstab.${section}.options=rw,noatime,commit=60,discard"
 uci set "fstab.${section}.enabled=1"
 uci set "fstab.${section}.enabled_fsck=0"
 uci commit fstab
 
 # Mount immediately
-mount -t ext4 -o rw,noatime,commit=60 "$DATA_PART" /mnt/data 2>&1
+mount -t ext4 -o rw,noatime,commit=60,discard "$DATA_PART" /mnt/data 2>&1
 mkdir -p /mnt/data/public
 chmod 777 /mnt/data/public
 
